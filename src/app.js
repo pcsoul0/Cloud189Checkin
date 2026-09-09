@@ -45,10 +45,9 @@ const run = async (userName, password, userSizeInfoMap, logger) => {
       } else {
         logger.error(e);
       }
-      if (e.code === "ECONNRESET" || e.code === "ETIMEDOUT") {
-        logger.error("请求超时");
-        throw e;
-      }
+      // 任何签到异常都向上抛出，由 main() 记录失败状态，
+      // 最终以非零码退出，触发 Actions 的 retry 重新执行
+      throw e;
     } finally {
       logger.log(
         `执行完毕, 耗时 ${((Date.now() - before) / 1000).toFixed(2)} 秒`
@@ -61,13 +60,19 @@ const run = async (userName, password, userSizeInfoMap, logger) => {
 async function main() {
   //  用于统计实际容量变化
   const userSizeInfoMap = new Map();
+  let hasError = false;
   for (let index = 0; index < accounts.length; index++) {
     const account = accounts[index];
     const { userName, password } = account;
     const userNameInfo = mask(userName, 3, userName.length - 2);
     const logger = log4js.getLogger(userName);
     logger.addContext("user", userNameInfo);
-    await run(userName, password, userSizeInfoMap, logger);
+    try {
+      await run(userName, password, userSizeInfoMap, logger);
+    } catch (e) {
+      // 记录失败，但继续执行后续账号
+      hasError = true;
+    }
   }
 
   //数据汇总
@@ -101,13 +106,18 @@ async function main() {
       ).toFixed(2)}G`
     );
   }
+
+  return hasError;
 }
 
 (async () => {
+  let failed = false;
   try {
-    await main();
+    failed = await main();
     //等待日志文件写入
     await delay(1000);
+  } catch (e) {
+    failed = true;
   } finally {
     const logs = catLogs();
     const events = recording.replay();
@@ -115,5 +125,10 @@ async function main() {
     push("天翼云盘自动签到任务", logs + content);
     recording.erase();
     cleanLogs();
+    if (failed) {
+      // 以非零退出码结束进程，触发 nick-fields/retry 重新执行。
+      // 注意：不能用 process.exit(1)，它会立即中断尚未完成的推送请求
+      process.exitCode = 1;
+    }
   }
 })();
